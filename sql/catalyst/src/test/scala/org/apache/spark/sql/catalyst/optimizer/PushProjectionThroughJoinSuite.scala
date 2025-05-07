@@ -24,33 +24,28 @@ import org.apache.spark.sql.catalyst.plans.PlanTest
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.RuleExecutor
 
-
 class PushProjectionThroughJoinSuite extends PlanTest {
   object Optimize extends RuleExecutor[LogicalPlan] {
-    val batches =
+    val batches: Seq[Batch] =
       Batch("PushProjectionThroughJoin", FixedPoint(10), PushProjectionThroughJoin) :: Nil
   }
 
   val usersRelation: LocalRelation = LocalRelation.fromExternalRows(
     Seq("uid".attr.int, "name".attr.string),
-    Seq(Row(1, "Alice"), Row(2, "Bob"), Row(3, "Charlie"))
-  )
+    Seq(Row(1, "Alice"), Row(2, "Bob"), Row(3, "Charlie")))
 
   val balanceRelation: LocalRelation = LocalRelation.fromExternalRows(
     Seq("b_uid".attr.int, "balance".attr.double),
-    Seq(Row(1, 100.0), Row(2, 200.0), Row(3, 300.0))
-  )
+    Seq(Row(1, 100.0), Row(2, 200.0), Row(3, 300.0)))
 
   test("Simple Case -- No Push down") {
     val testRelationOne = LocalRelation.fromExternalRows(
       Seq("a_uid".attr.int, "name".attr.string, "balance".attr.double),
-      Seq(Row(1, "Alice", 100.0), Row(2, "Bob", 200.0), Row(3, "Charlie", 300.0))
-    )
+      Seq(Row(1, "Alice", 100.0), Row(2, "Bob", 200.0), Row(3, "Charlie", 300.0)))
 
     val testRelationTwo = LocalRelation.fromExternalRows(
       Seq("t_uid".attr.int, "type".attr.string),
-      Seq(Row(1, "savings"), Row(2, "priority"), Row(3, "wealth"))
-    )
+      Seq(Row(1, "savings"), Row(2, "priority"), Row(3, "wealth")))
 
     val query = testRelationOne
       .join(testRelationTwo, condition = Some("a_uid".attr === "t_uid".attr))
@@ -67,14 +62,16 @@ class PushProjectionThroughJoinSuite extends PlanTest {
 
     val query = usersRelation
       .join(balanceRelation, condition = Some("uid".attr === "b_uid".attr))
-      .select(upper($"name"), $"balance".attr).analyze
+      .select(upper($"name").as("name"), $"balance".attr)
+      .analyze
 
     val optimized = Optimize.execute(query)
 
     val expected = usersRelation
       .select(upper($"name").as("name"), $"uid".attr)
       .join(balanceRelation, condition = Some("uid".attr === "b_uid".attr))
-      .select($"name".attr, $"balance".attr).analyze
+      .select($"name".attr, $"balance".attr)
+      .analyze
 
     comparePlans(optimized, expected)
   }
@@ -83,15 +80,17 @@ class PushProjectionThroughJoinSuite extends PlanTest {
 
     val query = usersRelation
       .join(balanceRelation, condition = Some("uid".attr === "b_uid".attr))
-      .select($"name".attr, abs($"balance".attr)).analyze
+      .select($"name".attr, abs($"balance".attr).as("balance"))
+      .analyze
 
     val optimized = Optimize.execute(query)
 
     val expected = usersRelation
       .join(
-        balanceRelation.select($"b_uid".attr, abs($"balance".attr).as("balance")),
+        balanceRelation.select(abs($"balance".attr).as("balance"), $"b_uid".attr),
         condition = Some("uid".attr === "b_uid".attr))
-      .select($"name".attr, $"balance".attr).analyze
+      .select($"name".attr, $"balance".attr)
+      .analyze
 
     comparePlans(optimized, expected)
   }
@@ -99,14 +98,15 @@ class PushProjectionThroughJoinSuite extends PlanTest {
   test("Simple Case -- Push down both sides") {
     val query = usersRelation
       .join(balanceRelation, condition = Some("uid".attr === "b_uid".attr))
-      .select(upper($"name"), abs($"balance".attr)).analyze
+      .select(upper($"name").as("name"), abs($"balance".attr).as("balance"))
+      .analyze
 
     val optimized = Optimize.execute(query)
 
     val expected = usersRelation
-      .select($"uid".attr, upper($"name").as("name"))
+      .select(upper($"name").as("name"), $"uid".attr)
       .join(
-        balanceRelation.select($"b_uid".attr, abs($"balance".attr).as("balance")),
+        balanceRelation.select(abs($"balance".attr).as("balance"), $"b_uid".attr),
         condition = Some("uid".attr === "b_uid".attr))
       .select($"name".attr, $"balance".attr)
       .analyze
@@ -117,7 +117,10 @@ class PushProjectionThroughJoinSuite extends PlanTest {
   test("Simple Case -- Push down partial expression") {
     val query = usersRelation
       .join(balanceRelation, condition = Some("uid".attr === "b_uid".attr))
-      .select(intToLiteral(10).as("a"), upper($"name"), abs($"balance".attr))
+      .select(
+        intToLiteral(10).as("a"),
+        upper($"name").as("name"),
+        abs($"balance".attr).as("balance"))
       .analyze
 
     val optimized = Optimize.execute(query)
@@ -132,4 +135,7 @@ class PushProjectionThroughJoinSuite extends PlanTest {
 
     comparePlans(optimized, expected)
   }
+
+  // TODO: Add tests with non-deterministic expressions
+  // TODO: Add tests case where join is highly selective, where pushing down is costly
 }
