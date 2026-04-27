@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Apache Spark
 
 ## Pre-flight Checks
@@ -24,7 +28,28 @@ Avoid introducing non-ASCII characters in code or comments. String literals may 
 
 Build and tests can take a long time. Before running tests, ask the user if they have more changes to make.
 
-Prefer SBT over Maven for faster incremental compilation. Module names are defined in `project/SparkBuild.scala`.
+Prefer SBT over Maven for faster incremental compilation. Module names are defined in `project/SparkBuild.scala`. Common ones:
+
+| SBT module ID | Source directory |
+|---|---|
+| `core` | `core/` |
+| `catalyst` | `sql/catalyst/` |
+| `sql` | `sql/core/` |
+| `sql-api` | `sql/api/` |
+| `hive` | `sql/hive/` |
+| `hive-thriftserver` | `sql/hive-thriftserver/` |
+| `connect-common` | `sql/connect/common/` |
+| `connect` | `sql/connect/server/` |
+| `connect-client-jvm` | `sql/connect/client/jvm/` |
+| `streaming` | `streaming/` |
+| `mllib` | `mllib/` |
+| `graphx` | `graphx/` |
+| `launcher` | `launcher/` |
+| `network-common` | `common/network-common/` |
+| `common-utils` | `common/utils/` |
+| `unsafe` | `common/unsafe/` |
+| `variant` | `common/variant/` |
+| `pipelines` | `sql/pipelines/` |
 
 Compile a single module:
 
@@ -48,6 +73,27 @@ For faster iteration, keep SBT open in interactive mode:
     build/sbt
     > project <module>
     > testOnly *MySuite
+
+### Linting and Style
+
+Run Scala style checks (scalastyle + scalafmt for Connect modules):
+
+    dev/lint-scala
+
+Run Python linting (flake8, ruff, mypy):
+
+    dev/lint-python
+
+Run Java checkstyle:
+
+    dev/lint-java
+
+Scalafmt is enforced only on `sql/api`, `sql/connect/**`. To auto-format those modules:
+
+    ./build/mvn scalafmt:format -Dscalafmt.skip=false -Dscalafmt.validateOnly=false \
+      -Dscalafmt.changedOnly=false \
+      -pl sql/api -pl sql/connect/common -pl sql/connect/server \
+      -pl sql/connect/shims -pl sql/connect/client/jvm
 
 ### PySpark Tests
 
@@ -91,6 +137,61 @@ Step 3 — Fetch failure annotations:
     gh api repos/<OWNER>/spark/check-runs/<CHECK_RUN_ID>/annotations
 
 Each annotation contains the test class, test name, and failure message.
+
+## Code Architecture
+
+### SQL Query Execution Pipeline
+
+A SQL query or DataFrame operation passes through these stages (all lazy, in `QueryExecution`):
+
+```
+SQL text / DataFrame API
+        |
+        v
+  Unresolved LogicalPlan  (parser: sql/catalyst — ANTLR grammar in sql/catalyst/src/main/antlr4/)
+        |
+        v  Analyzer (sql/catalyst/src/main/scala/.../analysis/Analyzer.scala)
+           — resolves attribute references, functions, types using the Catalog
+        |
+        v  Analyzed LogicalPlan
+        |
+        v  Optimizer (sql/catalyst/src/main/scala/.../optimizer/Optimizer.scala)
+           — rule-based rewrites in batches (see optimizer/ directory for all rules)
+        |
+        v  Optimized LogicalPlan
+        |
+        v  SparkPlanner (sql/core — SparkStrategies.scala)
+           — converts logical operators to physical operators (SparkPlan)
+        |
+        v  SparkPlan (unexecuted)
+        |
+        v  preparations: Seq[Rule[SparkPlan]]
+           — EnsureRequirements (adds exchanges/sorts), CollapseCodegenStages,
+             InsertAdaptiveSparkPlan, etc.
+        |
+        v  Executed SparkPlan → RDD[InternalRow] → results
+```
+
+The `Analyzer`, `Optimizer`, and all rule batches use `RuleExecutor[LogicalPlan]` — see `docs/catalyst-optimizer-rule-guide.md` for a detailed developer guide on writing new rules.
+
+### SQL Subprojects
+
+| Module | Role |
+|---|---|
+| `sql/api` | Public types shared between Catalyst and Connect client (DataType, Row, etc.) |
+| `sql/catalyst` | Implementation-agnostic logical plan tree, expressions, analysis, and optimization framework |
+| `sql/core` | Query planner, physical execution (SparkPlan), DataFrameReader/Writer, SparkSession |
+| `sql/hive` | HiveQL support, Hive Metastore integration, Hive SerDe |
+| `sql/connect` | Spark Connect — gRPC-based remote execution protocol (proto + server + client) |
+| `sql/pipelines` | Declarative pipelines (DLT-style) |
+
+### Physical Execution — SparkStrategies
+
+`SparkStrategies.scala` (sql/core) defines `Strategy` objects that pattern-match on `LogicalPlan` nodes and emit `Seq[SparkPlan]`. Key strategies: `JoinSelection`, `Aggregation`, `BasicOperators`, `Window`, `InMemoryScans`. The planner calls all strategies and takes the first non-empty result.
+
+### Adaptive Query Execution (AQE)
+
+When AQE is enabled (`spark.sql.adaptive.enabled=true`), `InsertAdaptiveSparkPlan` wraps the physical plan. At runtime, shuffle statistics are used to re-optimize join strategies and partition counts. The AQE code lives in `sql/core/src/main/scala/.../execution/adaptive/`.
 
 ## Pull Request Workflow
 
